@@ -1,17 +1,9 @@
 package notification
 
 import (
-	"errors"
-	"github.com/smartwalle/notification/internal"
+	"github.com/smartwalle/queue/block"
 	"sync"
-	"time"
 	"unsafe"
-)
-
-type Handler[T any] func(name string, value T)
-
-var (
-	ErrTimeout = errors.New("dispatch notification timeout")
 )
 
 var shared *Center[interface{}]
@@ -26,13 +18,16 @@ func Default() *Center[interface{}] {
 
 type Center[T any] struct {
 	mu     *sync.Mutex
-	chains map[string]*internal.HandlerChain[T]
+	queue  block.Queue[Notification[T]]
+	chains map[string]HandlerChain[T]
 }
 
 func New[T any]() *Center[T] {
 	var center = &Center[T]{}
 	center.mu = &sync.Mutex{}
-	center.chains = make(map[string]*internal.HandlerChain[T])
+	center.queue = block.New[Notification[T]]()
+	center.chains = make(map[string]HandlerChain[T])
+	go center.run()
 	return center
 }
 
@@ -44,20 +39,16 @@ func (this *Center[T]) Handle(name string, handler Handler[T]) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	var chain, ok = this.chains[name]
-	if ok == false {
-		chain = internal.NewHandlerChain[T]()
-		this.chains[name] = chain
-	}
-
+	var chain = this.chains[name]
 	var handlerPoint = *(*int)(unsafe.Pointer(&handler))
-	for _, current := range chain.HandlerList {
+	for _, current := range chain {
 		if *(*int)(unsafe.Pointer(&current)) == handlerPoint {
 			return
 		}
 	}
 
-	chain.HandlerList = append(chain.HandlerList, internal.Handler[T](handler))
+	chain = append(chain, handler)
+	this.chains[name] = chain
 }
 
 func (this *Center[T]) Remove(name string) {
@@ -68,13 +59,6 @@ func (this *Center[T]) Remove(name string) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	var chain, ok = this.chains[name]
-	if ok == false {
-		return
-	}
-
-	close(chain.Notification)
-	chain.HandlerList = nil
 	delete(this.chains, name)
 }
 
@@ -93,19 +77,17 @@ func (this *Center[T]) RemoveHandler(name string, handler Handler[T]) {
 
 	var found = -1
 	var handlerPoint = *(*int)(unsafe.Pointer(&handler))
-	for i, current := range chain.HandlerList {
+	for i, current := range chain {
 		if *(*int)(unsafe.Pointer(&current)) == handlerPoint {
 			found = i
 		}
 	}
 
 	if found >= 0 {
-		chain.HandlerList = append(chain.HandlerList[:found], chain.HandlerList[found+1:]...)
+		chain = append(chain[:found], chain[found+1:]...)
 	}
 
-	if len(chain.HandlerList) == 0 {
-		close(chain.Notification)
-		chain.HandlerList = nil
+	if len(chain) == 0 {
 		delete(this.chains, name)
 	}
 }
@@ -114,30 +96,46 @@ func (this *Center[T]) RemoveAll() {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	for key, chain := range this.chains {
-		close(chain.Notification)
-		chain.HandlerList = nil
-		delete(this.chains, key)
+	for name := range this.chains {
+		delete(this.chains, name)
 	}
 }
 
-func (this *Center[T]) Dispatch(name string, value T) error {
+func (this *Center[T]) Dispatch(name string, value T) bool {
 	if len(name) == 0 {
-		return nil
+		return false
 	}
-	var notification = internal.NewNotification[T](name, value)
 
-	this.mu.Lock()
-	var chain = this.chains[name]
-	this.mu.Unlock()
+	var notification = Notification[T]{
+		name:  name,
+		value: value,
+	}
+	return this.queue.Enqueue(notification)
+}
 
-	if chain != nil {
-		select {
-		case chain.Notification <- notification:
-			return nil
-		case <-time.After(time.Second * 1):
-			return ErrTimeout
+func (this *Center[T]) Close() {
+	this.queue.Close()
+}
+
+func (this *Center[T]) run() {
+	var notifications []Notification[T]
+
+	for {
+		notifications = notifications[0:0]
+		var ok = this.queue.Dequeue(&notifications)
+
+		for _, notification := range notifications {
+			this.mu.Lock()
+			var chain = this.chains[notification.name]
+			this.mu.Unlock()
+
+			for _, handler := range chain {
+				handler(notification.name, notification.value)
+			}
+		}
+
+		if ok == false {
+			return
 		}
 	}
-	return nil
 }
