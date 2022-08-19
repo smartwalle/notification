@@ -16,17 +16,38 @@ func Default() *Center[interface{}] {
 	return shared
 }
 
+type Option func(opts *options)
+
+type options struct {
+	waiter Waiter
+}
+
+func WithWaiter(waiter Waiter) Option {
+	return func(opts *options) {
+		opts.waiter = waiter
+	}
+}
+
 type Center[T any] struct {
+	opts   *options
 	mu     *sync.Mutex
 	queue  block.Queue[Notification[T]]
 	chains map[string]HandlerChain[T]
 }
 
-func New[T any]() *Center[T] {
+func New[T any](opts ...Option) *Center[T] {
 	var center = &Center[T]{}
+	center.opts = &options{}
 	center.mu = &sync.Mutex{}
 	center.queue = block.New[Notification[T]]()
 	center.chains = make(map[string]HandlerChain[T])
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(center.opts)
+		}
+	}
+
 	go center.run()
 	return center
 }
@@ -110,7 +131,15 @@ func (this *Center[T]) Dispatch(name string, value T) bool {
 		name:  name,
 		value: value,
 	}
-	return this.queue.Enqueue(notification)
+	if this.opts.waiter != nil {
+		this.opts.waiter.Add(1)
+	}
+	var ok = this.queue.Enqueue(notification)
+
+	if ok == false && this.opts.waiter != nil {
+		this.opts.waiter.Done()
+	}
+	return ok
 }
 
 func (this *Center[T]) Close() {
@@ -131,6 +160,10 @@ func (this *Center[T]) run() {
 
 			for _, handler := range chain {
 				handler(notification.name, notification.value)
+			}
+
+			if this.opts.waiter != nil {
+				this.opts.waiter.Done()
 			}
 		}
 
