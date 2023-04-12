@@ -6,10 +6,10 @@ import (
 	"unsafe"
 )
 
-var shared *Center[interface{}]
+var shared Center[interface{}]
 var once sync.Once
 
-func Default() *Center[interface{}] {
+func Default() Center[interface{}] {
 	once.Do(func() {
 		shared = New[interface{}]()
 	})
@@ -28,31 +28,44 @@ func WithWaiter(waiter Waiter) Option {
 	}
 }
 
-type Center[T any] struct {
+type Center[T any] interface {
+	Handle(name string, handler Handler[T])
+
+	Remove(name string)
+
+	RemoveHandler(name string, handler Handler[T])
+
+	RemoveAll()
+
+	Dispatch(name string, value T) bool
+
+	Close()
+}
+
+type center[T any] struct {
 	opts   *options
-	mu     *sync.Mutex
+	mu     sync.RWMutex
 	queue  block.Queue[Notification[T]]
 	chains map[string]HandlerChain[T]
 }
 
-func New[T any](opts ...Option) *Center[T] {
-	var center = &Center[T]{}
-	center.opts = &options{}
-	center.mu = &sync.Mutex{}
-	center.queue = block.New[Notification[T]]()
-	center.chains = make(map[string]HandlerChain[T])
+func New[T any](opts ...Option) Center[T] {
+	var nCenter = &center[T]{}
+	nCenter.opts = &options{}
+	nCenter.queue = block.New[Notification[T]]()
+	nCenter.chains = make(map[string]HandlerChain[T])
 
 	for _, opt := range opts {
 		if opt != nil {
-			opt(center.opts)
+			opt(nCenter.opts)
 		}
 	}
 
-	go center.run()
-	return center
+	go nCenter.run()
+	return nCenter
 }
 
-func (this *Center[T]) Handle(name string, handler Handler[T]) {
+func (this *center[T]) Handle(name string, handler Handler[T]) {
 	if len(name) == 0 || handler == nil {
 		return
 	}
@@ -61,9 +74,9 @@ func (this *Center[T]) Handle(name string, handler Handler[T]) {
 	defer this.mu.Unlock()
 
 	var chain = this.chains[name]
-	var handlerPoint = *(*int)(unsafe.Pointer(&handler))
+	var pointer = *(*int)(unsafe.Pointer(&handler))
 	for _, current := range chain {
-		if *(*int)(unsafe.Pointer(&current)) == handlerPoint {
+		if *(*int)(unsafe.Pointer(&current)) == pointer {
 			return
 		}
 	}
@@ -72,7 +85,7 @@ func (this *Center[T]) Handle(name string, handler Handler[T]) {
 	this.chains[name] = chain
 }
 
-func (this *Center[T]) Remove(name string) {
+func (this *center[T]) Remove(name string) {
 	if len(name) == 0 {
 		return
 	}
@@ -83,7 +96,7 @@ func (this *Center[T]) Remove(name string) {
 	delete(this.chains, name)
 }
 
-func (this *Center[T]) RemoveHandler(name string, handler Handler[T]) {
+func (this *center[T]) RemoveHandler(name string, handler Handler[T]) {
 	if len(name) == 0 || handler == nil {
 		return
 	}
@@ -113,7 +126,7 @@ func (this *Center[T]) RemoveHandler(name string, handler Handler[T]) {
 	}
 }
 
-func (this *Center[T]) RemoveAll() {
+func (this *center[T]) RemoveAll() {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
@@ -122,7 +135,7 @@ func (this *Center[T]) RemoveAll() {
 	}
 }
 
-func (this *Center[T]) Dispatch(name string, value T) bool {
+func (this *center[T]) Dispatch(name string, value T) bool {
 	if len(name) == 0 {
 		return false
 	}
@@ -136,17 +149,17 @@ func (this *Center[T]) Dispatch(name string, value T) bool {
 	}
 	var ok = this.queue.Enqueue(notification)
 
-	if ok == false && this.opts.waiter != nil {
+	if !ok && this.opts.waiter != nil {
 		this.opts.waiter.Done()
 	}
 	return ok
 }
 
-func (this *Center[T]) Close() {
+func (this *center[T]) Close() {
 	this.queue.Close()
 }
 
-func (this *Center[T]) run() {
+func (this *center[T]) run() {
 	var notifications []Notification[T]
 
 	for {
@@ -154,9 +167,9 @@ func (this *Center[T]) run() {
 		var ok = this.queue.Dequeue(&notifications)
 
 		for _, notification := range notifications {
-			this.mu.Lock()
+			this.mu.RLock()
 			var chain = this.chains[notification.name]
-			this.mu.Unlock()
+			this.mu.RUnlock()
 
 			for _, handler := range chain {
 				handler(notification.name, notification.value)
@@ -167,7 +180,7 @@ func (this *Center[T]) run() {
 			}
 		}
 
-		if ok == false {
+		if !ok {
 			return
 		}
 	}
