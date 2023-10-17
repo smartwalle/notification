@@ -65,15 +65,15 @@ func New[T any](opts ...Option) Center[T] {
 	return nCenter
 }
 
-func (this *center[T]) Handle(name string, handler Handler[T]) {
+func (c *center[T]) Handle(name string, handler Handler[T]) {
 	if len(name) == 0 || handler == nil {
 		return
 	}
 
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	var chain = this.chains[name]
+	var chain = c.chains[name]
 	var pointer = *(*int)(unsafe.Pointer(&handler))
 	for _, current := range chain {
 		if *(*int)(unsafe.Pointer(&current)) == pointer {
@@ -82,29 +82,29 @@ func (this *center[T]) Handle(name string, handler Handler[T]) {
 	}
 
 	chain = append(chain, handler)
-	this.chains[name] = chain
+	c.chains[name] = chain
 }
 
-func (this *center[T]) Remove(name string) {
+func (c *center[T]) Remove(name string) {
 	if len(name) == 0 {
 		return
 	}
 
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	delete(this.chains, name)
+	delete(c.chains, name)
 }
 
-func (this *center[T]) RemoveHandler(name string, handler Handler[T]) {
+func (c *center[T]) RemoveHandler(name string, handler Handler[T]) {
 	if len(name) == 0 || handler == nil {
 		return
 	}
 
-	this.mu.Lock()
-	defer this.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	var chain, ok = this.chains[name]
+	var chain, ok = c.chains[name]
 	if ok == false {
 		return
 	}
@@ -122,20 +122,20 @@ func (this *center[T]) RemoveHandler(name string, handler Handler[T]) {
 	}
 
 	if len(chain) == 0 {
-		delete(this.chains, name)
+		delete(c.chains, name)
 	}
 }
 
-func (this *center[T]) RemoveAll() {
-	this.mu.Lock()
-	defer this.mu.Unlock()
+func (c *center[T]) RemoveAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	for name := range this.chains {
-		delete(this.chains, name)
+	for name := range c.chains {
+		delete(c.chains, name)
 	}
 }
 
-func (this *center[T]) Dispatch(name string, value T) bool {
+func (c *center[T]) Dispatch(name string, value T) bool {
 	if len(name) == 0 {
 		return false
 	}
@@ -144,39 +144,39 @@ func (this *center[T]) Dispatch(name string, value T) bool {
 		name:  name,
 		value: value,
 	}
-	if this.opts.waiter != nil {
-		this.opts.waiter.Add(1)
+	if c.opts.waiter != nil {
+		c.opts.waiter.Add(1)
 	}
-	var ok = this.queue.Enqueue(notification)
+	var ok = c.queue.Enqueue(notification)
 
-	if !ok && this.opts.waiter != nil {
-		this.opts.waiter.Done()
+	if !ok && c.opts.waiter != nil {
+		c.opts.waiter.Done()
 	}
 	return ok
 }
 
-func (this *center[T]) Close() {
-	this.queue.Close()
+func (c *center[T]) Close() {
+	c.queue.Close()
 }
 
-func (this *center[T]) run() {
+func (c *center[T]) run() {
 	var notifications []Notification[T]
 
 	for {
 		notifications = notifications[0:0]
-		var ok = this.queue.Dequeue(&notifications)
+		var ok = c.queue.Dequeue(&notifications)
 
 		for _, notification := range notifications {
-			this.mu.RLock()
-			var chain = this.chains[notification.name]
-			this.mu.RUnlock()
+			c.mu.RLock()
+			var chain = c.chains[notification.name]
+			c.mu.RUnlock()
 
 			for _, handler := range chain {
 				handler(notification.name, notification.value)
 			}
 
-			if this.opts.waiter != nil {
-				this.opts.waiter.Done()
+			if c.opts.waiter != nil {
+				c.opts.waiter.Done()
 			}
 		}
 
